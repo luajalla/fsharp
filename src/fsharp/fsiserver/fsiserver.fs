@@ -34,13 +34,40 @@ open System.Runtime.Remoting.Channels
 open System.Runtime.Remoting
 open System.Runtime.Remoting.Lifetime
 
+#if FSI_SERVER_INTELLISENSE
+
+type CompletionType =
+    | ActivePattern
+    | Class 
+    | Delegate
+    | Enum
+    | Event
+    | Exception 
+    | Field
+    | Interface
+    | Method
+    | Module
+    | Namespace
+    | Property
+    | Record
+    | Structure
+    | TypeDef
+    | Union
+    | UnionCase
+    | Value    
+    | Unknown
+
+#endif
+
 [<AbstractClass>]
 type internal FSharpInteractiveServer() =
     inherit System.MarshalByRefObject()  
     abstract Interrupt       : unit -> unit
 #if FSI_SERVER_INTELLISENSE
-    abstract Completions     : prefix:string -> string array
-    abstract GetDeclarations : text:string * names:string array -> (string * string * string * int) array
+    abstract Completions: prefix:string -> (CompletionType * string) array
+    
+    // abstract Completions     : prefix:string -> string array
+    // abstract GetDeclarations : text:string * names:string array -> (string * string * string * int) array
 #endif
     default x.Interrupt() = ()
 

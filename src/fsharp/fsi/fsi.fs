@@ -1164,6 +1164,12 @@ type internal FsiDynamicCompiler
          timing    = false;
         } 
 
+#if FSI_SERVER_INTELLISENSE
+
+open Microsoft.FSharp.Compiler.Server.Shared
+open Nameres
+      
+#endif
 
 type internal FsiIntellisenseProvider(tcGlobals, tcImports: TcImports) = 
 
@@ -1173,31 +1179,83 @@ type internal FsiIntellisenseProvider(tcGlobals, tcImports: TcImports) =
     // FsiIntellisense - v1 - identifier completion - namedItemInEnvL
     //----------------------------------------------------------------------------
 
-    member __.CompletionsForPartialLID istate (prefix:string) =
-        let lid,stem =
-            if prefix.IndexOf(".",StringComparison.Ordinal) >= 0 then
-                let parts = prefix.Split(Array.ofList ['.'])
-                let n = parts.Length
-                Array.sub parts 0 (n-1) |> Array.toList,parts.[n-1]
-            else
-                [],prefix   
-        let tcState = istate.tcState (* folded through now? *)
+    #if FSI_SERVER_INTELLISENSE
 
-        let amap = tcImports.GetImportMap()
-        let infoReader = new Infos.InfoReader(tcGlobals,amap)
-        let ncenv = new Nameres.NameResolver(tcGlobals,amap,infoReader,Nameres.FakeInstantiationGenerator)
-        // Note: for the accessor domain we should use (AccessRightsOfEnv tcState.TcEnvFromImpls)
-        let ad = Infos.AccessibleFromSomeFSharpCode
-        let nItems = Nameres.ResolvePartialLongIdent ncenv tcState.TcEnvFromImpls.NameEnv (ConstraintSolver.IsApplicableMethApprox tcGlobals amap rangeStdin) rangeStdin ad lid false
+    let filterIdents stem name acc =
+        let displayName = Nameres.DisplayNameOfItem tcGlobals name
+        if not (displayName.StartsWith(stem, StringComparison.Ordinal)) then acc
+        else 
+            match name with 
+            | Item.CtorGroup _ | Item.DelegateCtor _ -> acc
+            | _ ->
+                let completionType = 
+                    match name with
+                    | Item.Value valRef ->
+                        match valRef.TauType with
+                        | TType_fun _ -> CompletionType.Method
+                        | _ -> CompletionType.Value
+                    | Item.UnionCase _ -> CompletionType.UnionCase
+                    | Item.ActivePatternCase _ -> CompletionType.ActivePattern
+                    | Item.RecdField _ -> CompletionType.Field
+                    | Item.ILField _ -> CompletionType.Field
+                    | Item.Property _ -> CompletionType.Property
+                    | Item.ExnCase _ -> CompletionType.Exception
+                    | Item.Event _ -> CompletionType.Event
+                    | Item.MethodGroup _ -> CompletionType.Method
+                    | Item.Types (_, TType_fun(_, _)::_) -> CompletionType.Method
+                    | Item.Types (_, TType_app(tyconRef, _)::_) ->
+                        if tyconRef.IsEnumTycon then CompletionType.Enum
+                        elif tyconRef.IsUnionTycon then CompletionType.Union
+                        elif tyconRef.IsFSharpDelegateTycon then CompletionType.Delegate
+                        elif tyconRef.IsFSharpInterfaceTycon then CompletionType.Interface
+                        elif tyconRef.IsStructOrEnumTycon then CompletionType.Structure
+                        elif tyconRef.IsTypeAbbrev then CompletionType.TypeDef
+                        elif tyconRef.IsRecordTycon then CompletionType.Record
+                        else
+                            match tyconRef.TypeReprInfo with
+                            | TILObjModelRepr(_, _, t) when t.IsDelegate -> CompletionType.Delegate
+                            | _ -> CompletionType.Class
+                    | Item.Types _ -> CompletionType.Class
+                    | Item.ModuleOrNamespaces (m::_) -> if m.IsModule then CompletionType.Module else CompletionType.Namespace
+                    | _ -> CompletionType.Unknown
+                (completionType, displayName)::acc
+    #endif
+    
+    let resolveIdents istate (prefix:string) =
+            let lid,stem =
+                if prefix.IndexOf(".",StringComparison.Ordinal) >= 0 then
+                    let parts = prefix.Split(Array.ofList ['.'])
+                    let n = parts.Length
+                    Array.sub parts 0 (n-1) |> Array.toList,parts.[n-1]
+                else
+                    [],prefix   
+            let tcState = istate.tcState (* folded through now? *)
+
+            let amap = tcImports.GetImportMap()
+            let infoReader = new Infos.InfoReader(tcGlobals,amap)
+            let ncenv = new Nameres.NameResolver(tcGlobals,amap,infoReader,Nameres.FakeInstantiationGenerator)
+            // Note: for the accessor domain we should use (AccessRightsOfEnv tcState.TcEnvFromImpls)
+            let ad = Infos.AccessibleFromSomeFSharpCode
+            let nItems = Nameres.ResolvePartialLongIdent ncenv tcState.TcEnvFromImpls.NameEnv (ConstraintSolver.IsApplicableMethApprox tcGlobals amap rangeStdin) rangeStdin ad lid false
+            stem, nItems
+    
+    member __.CompletionsForPartialLID istate (prefix:string) =
+        let stem, nItems = resolveIdents istate prefix
         let names  = nItems |> List.map (Nameres.DisplayNameOfItem tcGlobals) 
-        let names  = names |> List.filter (fun (name:string) -> name.StartsWith(stem,StringComparison.Ordinal)) 
+        let names  = names |> List.filter (fun (name:string) -> name.StartsWith(stem,StringComparison.Ordinal))        
         names
 
 #if FSI_SERVER_INTELLISENSE
+
+    member __.Completions istate (prefix:string) =
+        let stem, nItems = resolveIdents istate prefix
+        let names = List.foldBack (filterIdents stem) nItems []
+        names |> Seq.distinct |> Seq.toArray
+
     //----------------------------------------------------------------------------
     // FsiIntellisense (posible feature for v2) - GetDeclarations
     //----------------------------------------------------------------------------
-
+    (*
     member __.FsiGetDeclarations istate (text:string) (names:string[]) =
         try
           let tcConfig = TcConfig.Create(tcConfigB,validate=false)
@@ -1211,7 +1269,7 @@ type internal FsiIntellisenseProvider(tcGlobals, tcImports: TcImports) =
         with
           e ->
             System.Windows.Forms.MessageBox.Show("FsiGetDeclarations: throws:\n" ^ e.ToString()) |> ignore;
-            [| |]
+            [| |] *)
 
 #endif
 
@@ -2056,6 +2114,8 @@ let internal SpawnThread name f =
 let internal SpawnInteractiveServer 
                            (fsiOptions : FsiCommandLineOptions, 
                             fsiConsoleOutput:  FsiConsoleOutput,
+                            fsiIntellisenseProvider: FsiIntellisenseProvider,
+                            istateRef,
                             fsiInterruptController : FsiInterruptController) =   
     //printf "Spawning fsi server on channel '%s'" !fsiServerName;
     SpawnThread "ServerThread" (fun () ->
@@ -2075,12 +2135,12 @@ let internal SpawnInteractiveServer
 #if FSI_SERVER_INTELLISENSE
                     member this.Completions(prefix) = 
                         try 
-                            fsiIntellisenseProvider.CompletionsForPartialLID !istateRef prefix  |> List.toArray
+                            fsiIntellisenseProvider.Completions !istateRef prefix
                         with e -> 
                             // Final sanity check! - catch all exns - but not expected
                             assert false
                             [| |] 
-
+                    (*
                     member this.GetDeclarations(text,names) = 
                         try 
                             // Stop the type checker running at the same time as the intellisense provider.
@@ -2088,7 +2148,7 @@ let internal SpawnInteractiveServer
                         with e -> 
                             // Final sanity check! - catch all exns - but not expected 
                             assert false
-                            [| |] 
+                            [| |] *)
 #endif
                  }
 
@@ -2444,7 +2504,7 @@ type FsiEvaluationSession (argv:string[], inReader:TextReader, outWriter:TextWri
 
     
         if not runningOnMono && fsiOptions.IsInteractiveServer then 
-            SpawnInteractiveServer (fsiOptions, fsiConsoleOutput, fsiInterruptController)
+            SpawnInteractiveServer (fsiOptions, fsiConsoleOutput, fsiIntellisenseProvider, istateRef, fsiInterruptController)
 
         use unwindBuildPhase = PushThreadBuildPhaseUntilUnwind (BuildPhase.Interactive)
 
